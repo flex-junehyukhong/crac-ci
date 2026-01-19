@@ -49,7 +49,7 @@ jobs:
         run: |
           CONFIG_FILE="${{ inputs.config-path }}"
           VALID="true"
-          NODE_COUNT=0
+          NODE_COUNT=1
 
           echo "=========================================="
           echo "Validating Kind Configuration"
@@ -72,7 +72,7 @@ jobs:
           echo ""
           echo "----------------------------------------"
 
-          # Validate YAML syntax using Python (always available)
+          # Validate YAML syntax
           echo ""
           echo "Step 1: Checking YAML syntax..."
           if python3 -c "import yaml; yaml.safe_load(open('${CONFIG_FILE}'))"; then
@@ -82,48 +82,26 @@ jobs:
             VALID="false"
           fi
 
-          # Check Kind config structure using Python
+          # Check Kind config structure
           echo ""
           echo "Step 2: Checking Kind config structure..."
-          python3 << EOF
-import yaml
-import sys
+          KIND_TYPE=$(python3 -c "import yaml; print(yaml.safe_load(open('${CONFIG_FILE}')).get('kind', ''))")
+          API_VERSION=$(python3 -c "import yaml; print(yaml.safe_load(open('${CONFIG_FILE}')).get('apiVersion', ''))")
+          NODE_COUNT=$(python3 -c "import yaml; c=yaml.safe_load(open('${CONFIG_FILE}')); print(len(c.get('nodes', [])) or 1)")
 
-with open('${CONFIG_FILE}') as f:
-    config = yaml.safe_load(f)
+          echo "  kind: ${KIND_TYPE}"
+          echo "  apiVersion: ${API_VERSION}"
+          echo "  nodes: ${NODE_COUNT}"
 
-kind_type = config.get('kind', '')
-api_version = config.get('apiVersion', '')
-
-print(f"  kind: {kind_type}")
-print(f"  apiVersion: {api_version}")
-
-errors = []
-if kind_type != 'Cluster':
-    errors.append(f"Invalid kind: expected 'Cluster', got '{kind_type}'")
-
-if not api_version.startswith('kind.x-k8s.io/'):
-    errors.append(f"Invalid apiVersion: {api_version}")
-
-nodes = config.get('nodes', [])
-node_count = len(nodes) if nodes else 1
-print(f"  nodes: {node_count}")
-
-# Write node count to file for bash to read
-with open('/tmp/node_count', 'w') as f:
-    f.write(str(node_count))
-
-if errors:
-    for e in errors:
-        print(f"::error::{e}")
-    sys.exit(1)
-EOF
-
-          if [[ $? -ne 0 ]]; then
+          if [[ "${KIND_TYPE}" != "Cluster" ]]; then
+            echo "::error::Invalid kind: expected 'Cluster', got '${KIND_TYPE}'"
             VALID="false"
           fi
 
-          NODE_COUNT=$(cat /tmp/node_count 2>/dev/null || echo "1")
+          if [[ ! "${API_VERSION}" =~ ^kind\.x-k8s\.io/ ]]; then
+            echo "::error::Invalid apiVersion: ${API_VERSION}"
+            VALID="false"
+          fi
 
           # Dry run validation with Kind
           if [[ "${{ inputs.validate-schema }}" == "true" && "${VALID}" == "true" ]]; then
