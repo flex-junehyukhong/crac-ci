@@ -1,0 +1,242 @@
+name: Kind Cluster Validation
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: 'Path to Kind cluster config file'
+        type: string
+        required: true
+      kind-version:
+        description: 'Kind version for validation'
+        type: string
+        required: false
+        default: '0.22.0'
+      kubernetes-version:
+        description: 'Expected Kubernetes version'
+        type: string
+        required: false
+        default: ''
+      validate-schema:
+        description: 'Validate against Kind config schema'
+        type: boolean
+        required: false
+        default: true
+      check-node-config:
+        description: 'Validate node configuration'
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      valid:
+        description: 'Whether the config is valid'
+        value: ${{ jobs.kind-validate.outputs.valid }}
+      node-count:
+        description: 'Number of nodes in configuration'
+        value: ${{ jobs.kind-validate.outputs.node-count }}
+
+jobs:
+  kind-validate:
+    name: Validate Kind Config
+    runs-on: ubuntu-latest
+
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+      node-count: ${{ steps.validate.outputs.node_count }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v${{ inputs.kind-version }}/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Validate Kind Configuration
+        id: validate
+        run: |
+          CONFIG_FILE="${{ inputs.config-path }}"
+          VALID="true"
+          ERROR_MSG=""
+          NODE_COUNT=0
+
+          echo "=========================================="
+          echo "Validating Kind Configuration"
+          echo "=========================================="
+          echo "Config file: ${CONFIG_FILE}"
+          echo ""
+
+          # Check file exists
+          if [[ ! -f "${CONFIG_FILE}" ]]; then
+            echo "::error::Config file not found: ${CONFIG_FILE}"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "error_message=Config file not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Display config
+          echo "Configuration:"
+          echo "----------------------------------------"
+          cat "${CONFIG_FILE}"
+          echo ""
+          echo "----------------------------------------"
+
+          # Validate YAML syntax
+          echo ""
+          echo "Step 1: Checking YAML syntax..."
+          if ! yq eval '.' "${CONFIG_FILE}" > /dev/null 2>&1; then
+            echo "::error::Invalid YAML syntax"
+            VALID="false"
+            ERROR_MSG="Invalid YAML syntax"
+          else
+            echo "YAML syntax is valid"
+          fi
+
+          # Check Kind config structure
+          echo ""
+          echo "Step 2: Checking Kind config structure..."
+          KIND_TYPE=$(yq eval '.kind // ""' "${CONFIG_FILE}")
+          API_VERSION=$(yq eval '.apiVersion // ""' "${CONFIG_FILE}")
+
+          echo "  kind: ${KIND_TYPE}"
+          echo "  apiVersion: ${API_VERSION}"
+
+          if [[ "${KIND_TYPE}" != "Cluster" ]]; then
+            echo "::error::Invalid kind: expected 'Cluster', got '${KIND_TYPE}'"
+            VALID="false"
+            ERROR_MSG="${ERROR_MSG}; Invalid kind type"
+          fi
+
+          if [[ ! "${API_VERSION}" =~ ^kind\.x-k8s\.io/ ]]; then
+            echo "::error::Invalid apiVersion: ${API_VERSION}"
+            VALID="false"
+            ERROR_MSG="${ERROR_MSG}; Invalid apiVersion"
+          fi
+
+          # Count and validate nodes
+          if [[ "${{ inputs.check-node-config }}" == "true" ]]; then
+            echo ""
+            echo "Step 3: Checking node configuration..."
+
+            NODE_COUNT=$(yq eval '.nodes | length' "${CONFIG_FILE}" 2>/dev/null || echo "0")
+            echo "  Total nodes: ${NODE_COUNT}"
+
+            if [[ "${NODE_COUNT}" -eq 0 ]]; then
+              echo "::warning::No nodes defined - Kind will use default single node"
+              NODE_COUNT=1
+            fi
+
+            # Check for control-plane node
+            CONTROL_PLANE_COUNT=$(yq eval '[.nodes[] | select(.role == "control-plane")] | length' "${CONFIG_FILE}" 2>/dev/null || echo "0")
+            WORKER_COUNT=$(yq eval '[.nodes[] | select(.role == "worker")] | length' "${CONFIG_FILE}" 2>/dev/null || echo "0")
+
+            echo "  Control plane nodes: ${CONTROL_PLANE_COUNT}"
+            echo "  Worker nodes: ${WORKER_COUNT}"
+
+            # Validate node images
+            echo ""
+            echo "  Node images:"
+            while IFS= read -r image; do
+              if [[ -n "${image}" && "${image}" != "null" ]]; then
+                echo "    - ${image}"
+                if [[ ! "${image}" =~ kindest/node ]]; then
+                  echo "::warning::Non-standard Kind node image: ${image}"
+                fi
+              fi
+            done < <(yq eval '.nodes[].image // ""' "${CONFIG_FILE}" 2>/dev/null)
+          fi
+
+          # Check Kubernetes version if specified
+          if [[ -n "${{ inputs.kubernetes-version }}" ]]; then
+            echo ""
+            echo "Step 4: Checking Kubernetes version..."
+            EXPECTED_VERSION="${{ inputs.kubernetes-version }}"
+            echo "  Expected: ${EXPECTED_VERSION}"
+
+            CONFIG_VERSION=$(yq eval '.nodes[0].image // ""' "${CONFIG_FILE}" | grep -oP 'v\d+\.\d+\.\d+' || echo "")
+            if [[ -n "${CONFIG_VERSION}" ]]; then
+              echo "  Found: ${CONFIG_VERSION}"
+              if [[ "${CONFIG_VERSION}" != "v${EXPECTED_VERSION}" ]]; then
+                echo "::warning::Kubernetes version mismatch"
+              fi
+            fi
+          fi
+
+          # Validate networking
+          echo ""
+          echo "Step 5: Checking networking configuration..."
+          POD_SUBNET=$(yq eval '.networking.podSubnet // ""' "${CONFIG_FILE}")
+          SERVICE_SUBNET=$(yq eval '.networking.serviceSubnet // ""' "${CONFIG_FILE}")
+          DISABLE_CNI=$(yq eval '.networking.disableDefaultCNI // false' "${CONFIG_FILE}")
+          API_SERVER_ADDRESS=$(yq eval '.networking.apiServerAddress // ""' "${CONFIG_FILE}")
+
+          if [[ -n "${POD_SUBNET}" ]]; then
+            echo "  Pod subnet: ${POD_SUBNET}"
+          fi
+          if [[ -n "${SERVICE_SUBNET}" ]]; then
+            echo "  Service subnet: ${SERVICE_SUBNET}"
+          fi
+          if [[ "${DISABLE_CNI}" == "true" ]]; then
+            echo "  Default CNI: disabled"
+          fi
+          if [[ -n "${API_SERVER_ADDRESS}" ]]; then
+            echo "  API server address: ${API_SERVER_ADDRESS}"
+          fi
+
+          # Check port mappings
+          echo ""
+          echo "Step 6: Checking port mappings..."
+          PORT_MAPPINGS=$(yq eval '[.nodes[].extraPortMappings // [] | .[]] | length' "${CONFIG_FILE}" 2>/dev/null || echo "0")
+          echo "  Total port mappings: ${PORT_MAPPINGS}"
+
+          if [[ "${PORT_MAPPINGS}" -gt 0 ]]; then
+            yq eval '.nodes[].extraPortMappings[]' "${CONFIG_FILE}" 2>/dev/null | while read -r mapping; do
+              echo "    ${mapping}"
+            done || true
+          fi
+
+          # Dry run validation
+          if [[ "${{ inputs.validate-schema }}" == "true" ]]; then
+            echo ""
+            echo "Step 7: Running Kind dry-run validation..."
+            if ! kind create cluster --config "${CONFIG_FILE}" --name validation-test --dry-run 2>&1; then
+              echo "::error::Kind dry-run validation failed"
+              VALID="false"
+              ERROR_MSG="${ERROR_MSG}; Kind dry-run failed"
+            else
+              echo "  Dry-run validation passed"
+            fi
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Validation Result: ${VALID}"
+          echo "=========================================="
+
+          echo "valid=${VALID}" >> $GITHUB_OUTPUT
+          echo "node_count=${NODE_COUNT}" >> $GITHUB_OUTPUT
+          echo "error_message=${ERROR_MSG}" >> $GITHUB_OUTPUT
+
+          if [[ "${VALID}" != "true" ]]; then
+            exit 1
+          fi
+
+      - name: Add Summary
+        if: always()
+        run: |
+          echo "## Kind Configuration Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Config File | \`${{ inputs.config-path }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Valid | ${{ steps.validate.outputs.valid }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Node Count | ${{ steps.validate.outputs.node_count }} |" >> $GITHUB_STEP_SUMMARY

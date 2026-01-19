@@ -1,0 +1,117 @@
+name: Helm Chart Validation
+
+on:
+  workflow_call:
+    inputs:
+      chart-path:
+        description: 'Path to Helm chart directory'
+        type: string
+        required: true
+      values-file:
+        description: 'Additional values file for rendering'
+        type: string
+        required: false
+        default: ''
+      kube-version:
+        description: 'Kubernetes version for validation'
+        type: string
+        required: false
+        default: '1.29.0'
+      strict:
+        description: 'Enable strict mode (warnings cause failure)'
+        type: boolean
+        required: false
+        default: false
+      helm-version:
+        description: 'Helm version to use'
+        type: string
+        required: false
+        default: '3.14.0'
+      upload-manifests:
+        description: 'Upload rendered manifests as artifact'
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      lint-passed:
+        description: 'Whether helm lint passed'
+        value: ${{ jobs.helm-validate.outputs.lint-passed }}
+      template-passed:
+        description: 'Whether helm template passed'
+        value: ${{ jobs.helm-validate.outputs.template-passed }}
+
+jobs:
+  helm-validate:
+    name: Validate Helm Chart
+    runs-on: ubuntu-latest
+
+    outputs:
+      lint-passed: ${{ steps.validate.outputs.lint_passed }}
+      template-passed: ${{ steps.validate.outputs.template_passed }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ inputs.helm-version }}
+
+      - name: Checkout CI Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/crac-ci
+          path: .crac-ci
+          sparse-checkout: scripts
+
+      - name: Add Helm Repositories (if needed)
+        run: |
+          if [[ -f "${{ inputs.chart-path }}/Chart.lock" ]]; then
+            echo "Building Helm dependencies..."
+            helm dependency build "${{ inputs.chart-path }}" || true
+          fi
+
+      - name: Run Helm Validation
+        id: validate
+        run: |
+          chmod +x .crac-ci/scripts/validate-helm.sh
+
+          ARGS=""
+
+          if [[ -n "${{ inputs.values-file }}" ]]; then
+            ARGS="${ARGS} --values ${{ inputs.values-file }}"
+          fi
+
+          if [[ -n "${{ inputs.kube-version }}" ]]; then
+            ARGS="${ARGS} --kube-version ${{ inputs.kube-version }}"
+          fi
+
+          if [[ "${{ inputs.strict }}" == "true" ]]; then
+            ARGS="${ARGS} --strict"
+          fi
+
+          mkdir -p ./rendered-manifests
+          ARGS="${ARGS} --output ./rendered-manifests"
+
+          .crac-ci/scripts/validate-helm.sh ${ARGS} -v "${{ inputs.chart-path }}"
+
+      - name: Upload Rendered Manifests
+        if: ${{ inputs.upload-manifests && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-rendered-manifests
+          path: ./rendered-manifests/
+          retention-days: 7
+
+      - name: Add Summary
+        if: always()
+        run: |
+          echo "## Helm Chart Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ steps.validate.outputs.lint_passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Template | ${{ steps.validate.outputs.template_passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Chart Path:** \`${{ inputs.chart-path }}\`" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,111 @@
+name: 'CRaC Compatibility Analysis'
+description: 'Analyze Java source code for CRaC (Coordinated Restore at Checkpoint) compatibility issues'
+author: 'crac-ci'
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  source-path:
+    description: 'Path to Java source directory'
+    required: true
+    default: './src/main/java'
+  output-format:
+    description: 'Output format: text, json, markdown'
+    required: false
+    default: 'text'
+  output-file:
+    description: 'Output file path (optional)'
+    required: false
+    default: ''
+  fail-on-error:
+    description: 'Fail if ERROR level issues found'
+    required: false
+    default: 'true'
+  fail-on-warning:
+    description: 'Fail if WARNING level issues found'
+    required: false
+    default: 'false'
+  min-java-version:
+    description: 'Minimum Java version for CRaC support'
+    required: false
+    default: '17'
+  exclude-dirs:
+    description: 'Directories to exclude (comma-separated)'
+    required: false
+    default: 'test,tests,build,target,node_modules,.git'
+
+outputs:
+  error-count:
+    description: 'Number of ERROR level issues'
+    value: ${{ steps.analyze.outputs.error_count }}
+  warning-count:
+    description: 'Number of WARNING level issues'
+    value: ${{ steps.analyze.outputs.warning_count }}
+  info-count:
+    description: 'Number of INFO level issues'
+    value: ${{ steps.analyze.outputs.info_count }}
+  total-count:
+    description: 'Total number of issues'
+    value: ${{ steps.analyze.outputs.total_count }}
+  has-errors:
+    description: 'Whether ERROR level issues were found'
+    value: ${{ steps.analyze.outputs.has_errors }}
+  has-warnings:
+    description: 'Whether WARNING level issues were found'
+    value: ${{ steps.analyze.outputs.has_warnings }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout scripts
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/crac-ci
+        path: .crac-ci
+        sparse-checkout: scripts
+
+    - name: Run CRaC Analysis
+      id: analyze
+      shell: bash
+      run: |
+        chmod +x .crac-ci/scripts/check-crac-compatibility.sh
+
+        ARGS=""
+
+        if [[ -n "${{ inputs.output-format }}" ]]; then
+          ARGS="${ARGS} --format ${{ inputs.output-format }}"
+        fi
+
+        if [[ -n "${{ inputs.output-file }}" ]]; then
+          ARGS="${ARGS} --output ${{ inputs.output-file }}"
+        fi
+
+        if [[ "${{ inputs.fail-on-error }}" == "true" ]]; then
+          ARGS="${ARGS} --fail-on-error"
+        else
+          ARGS="${ARGS} --no-fail-on-error"
+        fi
+
+        if [[ "${{ inputs.fail-on-warning }}" == "true" ]]; then
+          ARGS="${ARGS} --fail-on-warning"
+        fi
+
+        if [[ -n "${{ inputs.min-java-version }}" ]]; then
+          ARGS="${ARGS} --min-java-version ${{ inputs.min-java-version }}"
+        fi
+
+        if [[ -n "${{ inputs.exclude-dirs }}" ]]; then
+          ARGS="${ARGS} --exclude-dirs ${{ inputs.exclude-dirs }}"
+        fi
+
+        .crac-ci/scripts/check-crac-compatibility.sh ${ARGS} "${{ inputs.source-path }}"
+
+    - name: Upload Analysis Report
+      if: inputs.output-file != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: crac-analysis-report
+        path: ${{ inputs.output-file }}
+        retention-days: 30

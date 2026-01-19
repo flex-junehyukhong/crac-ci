@@ -1,0 +1,120 @@
+name: CRaC Compatibility Check
+
+on:
+  workflow_call:
+    inputs:
+      source-path:
+        description: 'Path to Java source directory'
+        type: string
+        required: false
+        default: './src/main/java'
+      output-format:
+        description: 'Output format: text, json, markdown'
+        type: string
+        required: false
+        default: 'text'
+      fail-on-error:
+        description: 'Fail workflow if ERROR level issues found'
+        type: boolean
+        required: false
+        default: true
+      fail-on-warning:
+        description: 'Fail workflow if WARNING level issues found'
+        type: boolean
+        required: false
+        default: false
+      min-java-version:
+        description: 'Minimum Java version for CRaC support'
+        type: string
+        required: false
+        default: '17'
+      upload-report:
+        description: 'Upload analysis report as artifact'
+        type: boolean
+        required: false
+        default: true
+      java-version:
+        description: 'Java version to setup'
+        type: string
+        required: false
+        default: '21'
+    outputs:
+      error-count:
+        description: 'Number of ERROR level issues'
+        value: ${{ jobs.crac-analysis.outputs.error-count }}
+      warning-count:
+        description: 'Number of WARNING level issues'
+        value: ${{ jobs.crac-analysis.outputs.warning-count }}
+      has-errors:
+        description: 'Whether ERROR level issues were found'
+        value: ${{ jobs.crac-analysis.outputs.has-errors }}
+
+jobs:
+  crac-analysis:
+    name: CRaC Static Analysis
+    runs-on: ubuntu-latest
+
+    outputs:
+      error-count: ${{ steps.analyze.outputs.error_count }}
+      warning-count: ${{ steps.analyze.outputs.warning_count }}
+      has-errors: ${{ steps.analyze.outputs.has_errors }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ inputs.java-version }}
+
+      - name: Checkout CI Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/crac-ci
+          path: .crac-ci
+          sparse-checkout: scripts
+
+      - name: Run CRaC Compatibility Analysis
+        id: analyze
+        run: |
+          chmod +x .crac-ci/scripts/check-crac-compatibility.sh
+
+          REPORT_FILE="crac-report.${{ inputs.output-format == 'json' && 'json' || inputs.output-format == 'markdown' && 'md' || 'txt' }}"
+
+          ARGS="--format ${{ inputs.output-format }}"
+          ARGS="${ARGS} --output ${REPORT_FILE}"
+          ARGS="${ARGS} --min-java-version ${{ inputs.min-java-version }}"
+
+          if [[ "${{ inputs.fail-on-error }}" == "true" ]]; then
+            ARGS="${ARGS} --fail-on-error"
+          else
+            ARGS="${ARGS} --no-fail-on-error"
+          fi
+
+          if [[ "${{ inputs.fail-on-warning }}" == "true" ]]; then
+            ARGS="${ARGS} --fail-on-warning"
+          fi
+
+          .crac-ci/scripts/check-crac-compatibility.sh ${ARGS} "${{ inputs.source-path }}"
+
+      - name: Upload Analysis Report
+        if: ${{ inputs.upload-report && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: crac-analysis-report
+          path: |
+            crac-report.*
+          retention-days: 30
+
+      - name: Add Summary
+        if: always()
+        run: |
+          echo "## CRaC Compatibility Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Errors | ${{ steps.analyze.outputs.error_count || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Warnings | ${{ steps.analyze.outputs.warning_count || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Info | ${{ steps.analyze.outputs.info_count || '0' }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,95 @@
+name: 'Helm Lint'
+description: 'Validate Helm charts with lint and template rendering'
+author: 'crac-ci'
+
+branding:
+  icon: 'package'
+  color: 'green'
+
+inputs:
+  chart-path:
+    description: 'Path to Helm chart directory'
+    required: true
+  values-file:
+    description: 'Additional values file for rendering'
+    required: false
+    default: ''
+  kube-version:
+    description: 'Kubernetes version for validation'
+    required: false
+    default: ''
+  strict:
+    description: 'Enable strict mode (warnings cause failure)'
+    required: false
+    default: 'false'
+  output-dir:
+    description: 'Directory to save rendered manifests'
+    required: false
+    default: ''
+  helm-version:
+    description: 'Helm version to use'
+    required: false
+    default: '3.14.0'
+
+outputs:
+  lint-passed:
+    description: 'Whether helm lint passed'
+    value: ${{ steps.validate.outputs.lint_passed }}
+  template-passed:
+    description: 'Whether helm template passed'
+    value: ${{ steps.validate.outputs.template_passed }}
+  error-count:
+    description: 'Number of errors'
+    value: ${{ steps.validate.outputs.error_count }}
+  warning-count:
+    description: 'Number of warnings'
+    value: ${{ steps.validate.outputs.warning_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: ${{ inputs.helm-version }}
+
+    - name: Checkout scripts
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/crac-ci
+        path: .crac-ci
+        sparse-checkout: scripts
+
+    - name: Run Helm Validation
+      id: validate
+      shell: bash
+      run: |
+        chmod +x .crac-ci/scripts/validate-helm.sh
+
+        ARGS=""
+
+        if [[ -n "${{ inputs.values-file }}" ]]; then
+          ARGS="${ARGS} --values ${{ inputs.values-file }}"
+        fi
+
+        if [[ -n "${{ inputs.kube-version }}" ]]; then
+          ARGS="${ARGS} --kube-version ${{ inputs.kube-version }}"
+        fi
+
+        if [[ "${{ inputs.strict }}" == "true" ]]; then
+          ARGS="${ARGS} --strict"
+        fi
+
+        if [[ -n "${{ inputs.output-dir }}" ]]; then
+          ARGS="${ARGS} --output ${{ inputs.output-dir }}"
+        fi
+
+        .crac-ci/scripts/validate-helm.sh ${ARGS} "${{ inputs.chart-path }}"
+
+    - name: Upload Rendered Manifests
+      if: inputs.output-dir != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: helm-rendered-manifests
+        path: ${{ inputs.output-dir }}
+        retention-days: 7
