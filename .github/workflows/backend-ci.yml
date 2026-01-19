@@ -1,0 +1,137 @@
+# =============================================================================
+# Backend CI - 재사용 가능한 워크플로우
+# =============================================================================
+# 다른 저장소에서 호출하여 사용:
+#   uses: flex-junehyukhong/crac-ci/.github/workflows/backend-ci.yml@main
+# =============================================================================
+
+name: Backend CI
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        required: false
+        description: target workflow runner
+        type: string
+        default: 'ubuntu-latest'
+      java-version:
+        required: false
+        description: Java version to use
+        type: string
+        default: '21'
+      java-distribution:
+        required: false
+        description: Java distribution
+        type: string
+        default: 'corretto'
+      gradle_task:
+        required: false
+        description: target task names
+        type: string
+        default: check integrationTest jacocoTestReport
+      jvm_args:
+        required: false
+        description: gradle jvm args
+        type: string
+        default: -Xms4g -Xmx4g
+      require_font_install:
+        required: false
+        description: true if you need korean font for excel test
+        type: boolean
+        default: true
+
+jobs:
+  ci:
+    name: Build & Test
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      packages: read
+      checks: write
+
+    env:
+      LC_ALL: ko_KR.UTF-8
+
+    steps:
+      - name: Docker api version workaround
+        run: |
+          echo "api.version=1.44" >> $HOME/.docker-java.properties
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ inputs.java-distribution }}
+          java-version: ${{ inputs.java-version }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-read-only: false
+
+      - name: Install fonts for Excel test
+        if: inputs.require_font_install
+        run: |
+          sudo locale-gen ko_KR.UTF-8
+          sudo apt update && sudo apt install -y libfreetype6 fonts-dejavu-core fontconfig-config libfontconfig1
+
+      - name: Run Gradle tasks
+        run: |
+          ./gradlew ${{ inputs.gradle_task }} \
+            -Dorg.gradle.jvmargs='${{ inputs.jvm_args }}' \
+            --parallel \
+            --no-daemon
+
+      - name: Upload ktlint report
+        uses: jwgmeligmeyling/checkstyle-github-action@v1.2
+        if: always()
+        continue-on-error: true
+        with:
+          name: ktlint Report
+          path: '**/build/reports/ktlint/**/*.xml'
+
+      - name: Upload detekt report
+        uses: jwgmeligmeyling/checkstyle-github-action@v1.2
+        if: always()
+        continue-on-error: true
+        with:
+          name: detekt Report
+          path: '**/build/reports/detekt/detekt.xml'
+
+      - name: Upload Test Report
+        uses: mikepenz/action-junit-report@v3
+        if: always()
+        continue-on-error: true
+        with:
+          check_name: 'JUnit Test Report'
+          report_paths: '**/build/test-results/*[tT]est/TEST-*.xml'
+
+      - name: Add Test Summary
+        uses: test-summary/action@v1
+        if: always()
+        continue-on-error: true
+        with:
+          paths: '**/build/test-results/*[tT]est/TEST-*.xml'
+
+      - name: Add coverage to PR
+        id: jacoco
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: madrapps/jacoco-report@v1.7.2
+        with:
+          paths: '**/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml'
+          token: ${{ secrets.GITHUB_TOKEN }}
+          update-comment: true
+          title: Coverage Report
+          min-coverage-overall: 40
+          min-coverage-changed-files: 70
+
+      - name: Upload test artifacts on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results
+          path: '**/build/reports/tests/**'
