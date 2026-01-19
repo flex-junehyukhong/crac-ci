@@ -46,8 +46,8 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      lint-passed: ${{ steps.validate.outputs.lint_passed }}
-      template-passed: ${{ steps.validate.outputs.template_passed }}
+      lint-passed: ${{ steps.lint.outputs.passed }}
+      template-passed: ${{ steps.template.outputs.passed }}
 
     steps:
       - name: Checkout Repository
@@ -58,13 +58,6 @@ jobs:
         with:
           version: ${{ inputs.helm-version }}
 
-      - name: Checkout CI Scripts
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/crac-ci
-          path: .crac-ci
-          sparse-checkout: scripts
-
       - name: Add Helm Repositories (if needed)
         run: |
           if [[ -f "${{ inputs.chart-path }}/Chart.lock" ]]; then
@@ -72,29 +65,55 @@ jobs:
             helm dependency build "${{ inputs.chart-path }}" || true
           fi
 
-      - name: Run Helm Validation
-        id: validate
+      - name: Helm Lint
+        id: lint
         run: |
-          chmod +x .crac-ci/scripts/validate-helm.sh
-
-          ARGS=""
+          echo "Running helm lint..."
+          LINT_ARGS="${{ inputs.chart-path }}"
 
           if [[ -n "${{ inputs.values-file }}" ]]; then
-            ARGS="${ARGS} --values ${{ inputs.values-file }}"
-          fi
-
-          if [[ -n "${{ inputs.kube-version }}" ]]; then
-            ARGS="${ARGS} --kube-version ${{ inputs.kube-version }}"
+            LINT_ARGS="${LINT_ARGS} -f ${{ inputs.values-file }}"
           fi
 
           if [[ "${{ inputs.strict }}" == "true" ]]; then
-            ARGS="${ARGS} --strict"
+            LINT_ARGS="${LINT_ARGS} --strict"
           fi
 
-          mkdir -p ./rendered-manifests
-          ARGS="${ARGS} --output ./rendered-manifests"
+          if helm lint ${LINT_ARGS}; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "Helm lint passed"
+          else
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "Helm lint failed"
+            exit 1
+          fi
 
-          .crac-ci/scripts/validate-helm.sh ${ARGS} -v "${{ inputs.chart-path }}"
+      - name: Helm Template
+        id: template
+        run: |
+          echo "Running helm template..."
+          mkdir -p ./rendered-manifests
+
+          TEMPLATE_ARGS="test-release ${{ inputs.chart-path }}"
+
+          if [[ -n "${{ inputs.values-file }}" ]]; then
+            TEMPLATE_ARGS="${TEMPLATE_ARGS} -f ${{ inputs.values-file }}"
+          fi
+
+          if [[ -n "${{ inputs.kube-version }}" ]]; then
+            TEMPLATE_ARGS="${TEMPLATE_ARGS} --kube-version ${{ inputs.kube-version }}"
+          fi
+
+          if helm template ${TEMPLATE_ARGS} > ./rendered-manifests/manifests.yaml; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "Helm template passed"
+            RESOURCE_COUNT=$(grep -c "^kind:" ./rendered-manifests/manifests.yaml || echo 0)
+            echo "Rendered ${RESOURCE_COUNT} Kubernetes resources"
+          else
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "Helm template failed"
+            exit 1
+          fi
 
       - name: Upload Rendered Manifests
         if: ${{ inputs.upload-manifests && always() }}
@@ -111,7 +130,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Lint | ${{ steps.validate.outputs.lint_passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Template | ${{ steps.validate.outputs.template_passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ steps.lint.outputs.passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Template | ${{ steps.template.outputs.passed == 'true' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Chart Path:** \`${{ inputs.chart-path }}\`" >> $GITHUB_STEP_SUMMARY
